@@ -33,13 +33,13 @@ func versionString() string {
 	v, c, d := version, commit, date
 	dirty := false
 
-	if v == "" {
-		// Not a release build: say so rather than let a working copy three
-		// commits past the tag claim to be the released version.
-		v = strings.TrimSpace(declaredVersion) + "-dev"
-	}
-
 	if info, ok := debug.ReadBuildInfo(); ok {
+		// `go install module@version` records the module version it resolved,
+		// and applies no ldflags. Without this the officially published v0.1.1
+		// installed that way would call itself 0.1.1-dev.
+		if v == "" && info.Main.Version != "" && info.Main.Version != "(devel)" {
+			v = strings.TrimPrefix(info.Main.Version, "v")
+		}
 		for _, setting := range info.Settings {
 			switch setting.Key {
 			case "vcs.revision":
@@ -56,6 +56,11 @@ func versionString() string {
 		}
 	}
 
+	if v == "" {
+		// Neither stamped nor installed from a published version: a working
+		// copy, which must not claim to be the release it is sitting on.
+		v = strings.TrimSpace(declaredVersion) + "-dev"
+	}
 	if len(c) > 12 {
 		c = c[:12] // a short hash is enough to find the commit
 	}
