@@ -86,7 +86,7 @@ jobs:
       # Runs the real release build for every target and validates
       # .goreleaser.yaml on the way, so a broken release config is caught on
       # the pull request instead of on the tag, when it is too late.
-      - uses: goreleaser/goreleaser-action@v6
+      - uses: goreleaser/goreleaser-action@v7
         with:
           version: "~> v2"
           args: release --snapshot --clean
