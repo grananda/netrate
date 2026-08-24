@@ -32,7 +32,7 @@ jobs:
       version: ${{ steps.check.outputs.version }}
       release: ${{ steps.check.outputs.release }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # tags are the record of what has already gone out
 
@@ -61,7 +61,7 @@ jobs:
     if: needs.check.outputs.release == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # GoReleaser builds the changelog from the commits since the previous
           # tag, so it needs the whole history, not a shallow clone.
