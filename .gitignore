@@ -1,0 +1,15 @@
+# Build output. The binary takes its name from the last element of the module
+# path, so `go build` in the module root drops it right here.
+/netrate
+/dist/
+
+# Coverage and profiling artefacts
+*.out
+*.test
+*.prof
+
+# Editor and OS noise
+.idea/
+.vscode/
+*.swp
+.DS_Store
