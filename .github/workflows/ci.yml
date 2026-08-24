@@ -21,7 +21,7 @@ jobs:
         with:
           fetch-depth: 0 # the VERSION check needs the tags
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           # Tracks go.mod, so the toolchain can never drift from what the
           # module declares it needs.
@@ -78,7 +78,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
