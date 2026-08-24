@@ -1,0 +1,74 @@
+# Release build for netrate. Validated on every pull request by the "build" job
+# in .github/workflows/ci.yml, so a broken config surfaces before the tag.
+version: 2
+
+project_name: netrate
+
+before:
+  hooks:
+    - go mod download
+    - go test -short ./...
+
+builds:
+  - id: netrate
+    main: .
+    binary: netrate
+    env:
+      # A static binary: netrate needs no cgo, and this keeps it runnable on
+      # musl distros and in scratch containers.
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      # -s -w drop the symbol table and DWARF; the version stamps are what
+      # `netrate -version` reports. version.go falls back to the toolchain's
+      # own build info when they are absent.
+      - -s -w
+      - -X main.version={{ .Version }}
+      - -X main.commit={{ .FullCommit }}
+      - -X main.date={{ .CommitDate }}
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    # Stamp the commit time rather than the build time, so rebuilding a tag
+    # produces byte-identical archives.
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: netrate
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    # LICENSE and README are picked up automatically once they exist.
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+      - "^chore:"
+      - "^Merge "
+
+release:
+  prerelease: auto
+  footer: |
+    ---
+    ```
+    go install github.com/grananda/netrate@{{ .Tag }}
+    ```
+    or download a binary above and drop it on your PATH.

@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # Tracks go.mod, so the toolchain can never drift from what the
+          # module declares it needs.
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::these files are not gofmt'd:"
+            echo "$unformatted"
+            gofmt -d .
+            exit 1
+          fi
+
+      - name: Check go.mod is tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+      - name: Vet
+        run: go vet ./...
+
+      # -short skips TestFlow, the only test that touches the real network: it
+      # downloads for several seconds from a public server, which is neither
+      # polite nor reliable from a CI runner. Everything else runs against a
+      # local httptest server or is pure computation, including the engine's
+      # retry, early-exit and cancellation paths.
+      - name: Test
+        run: go test -short -race -timeout 5m ./...
+
+  build:
+    name: Build all release targets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Runs the real release build for every target and validates
+      # .goreleaser.yaml on the way, so a broken release config is caught on
+      # the pull request instead of on the tag, when it is too late.
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --snapshot --clean
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: snapshot-binaries
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/checksums.txt
+          retention-days: 7
+          if-no-files-found: error
