@@ -1,0 +1,89 @@
+name: Release
+
+# The version in the code is what cuts a release, not a tag typed by hand.
+# Every push to main asks one question: does VERSION name something that has
+# never been tagged? If so, tag it and publish; otherwise do nothing.
+#
+# That makes the whole thing idempotent — re-running a failed release, or
+# pushing an unrelated commit, cannot produce a second release of the same
+# version — and it keeps the released version reviewable in a pull request
+# alongside the change that earned it.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  # Creating the tag, the release and its assets needs write access. Nothing
+  # else here does, so the token gets nothing else.
+  contents: write
+
+concurrency:
+  # Never let two pushes race for the same tag. Not cancel-in-progress: a
+  # half-published release is worse than a queued one.
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Check version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      release: ${{ steps.check.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # tags are the record of what has already gone out
+
+      - id: check
+        name: Has this version been released?
+        run: |
+          version=$(tr -d '[:space:]' < VERSION)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error file=VERSION::'$version' is not a semantic version"
+            exit 1
+          fi
+
+          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::v$version is already released; nothing to do"
+          else
+            echo "release=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::VERSION is $version and carries no tag yet; releasing"
+          fi
+
+  release:
+    name: Release v${{ needs.check.outputs.version }}
+    needs: check
+    if: needs.check.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # GoReleaser builds the changelog from the commits since the previous
+          # tag, so it needs the whole history, not a shallow clone.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Tag the release
+        env:
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v${VERSION}" -m "netrate v${VERSION}"
+          git push origin "v${VERSION}"
+
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
