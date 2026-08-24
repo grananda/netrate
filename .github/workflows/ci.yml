@@ -18,6 +18,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the VERSION check needs the tags
 
       - uses: actions/setup-go@v5
         with:
@@ -25,6 +27,22 @@ jobs:
           # module declares it needs.
           go-version-file: go.mod
           cache: true
+
+      # VERSION is what cuts a release once this lands on main, so a malformed
+      # or already-published value is worth catching on the pull request. The
+      # notice says outright whether merging will publish anything.
+      - name: Check VERSION
+        run: |
+          version=$(tr -d '[:space:]' < VERSION)
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error file=VERSION::'$version' is not a semantic version"
+            exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            echo "::notice::VERSION is $version, already released: merging this will not publish anything"
+          else
+            echo "::notice::VERSION is $version: merging this to main will release v$version"
+          fi
 
       - name: Check formatting
         run: |

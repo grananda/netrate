@@ -1,16 +1,26 @@
 package main
 
 import (
+	_ "embed"
 	"fmt"
 	"runtime"
 	"runtime/debug"
 	"strings"
 )
 
+// VERSION is the single source of truth for what this code calls itself, and
+// the only thing that triggers a release: pushing it to main with a value that
+// has no tag yet is what makes the pipeline cut one.
+//
+// It is embedded rather than duplicated as a constant so the file CI reads and
+// the string the binary reports cannot drift apart.
+//
+//go:embed VERSION
+var declaredVersion string
+
 // Stamped by the release build through -ldflags. Any other build — go build,
-// go install, go run — leaves them empty and falls back to the build info the
-// Go toolchain records inside the binary itself, so a locally built netrate
-// still reports something truthful instead of "unknown".
+// go install, go run — leaves them empty and falls back to the embedded
+// version and to the build info the Go toolchain records in the binary.
 var (
 	version = ""
 	commit  = ""
@@ -23,10 +33,13 @@ func versionString() string {
 	v, c, d := version, commit, date
 	dirty := false
 
+	if v == "" {
+		// Not a release build: say so rather than let a working copy three
+		// commits past the tag claim to be the released version.
+		v = strings.TrimSpace(declaredVersion) + "-dev"
+	}
+
 	if info, ok := debug.ReadBuildInfo(); ok {
-		if v == "" {
-			v = info.Main.Version // "(devel)" for a plain go build
-		}
 		for _, setting := range info.Settings {
 			switch setting.Key {
 			case "vcs.revision":
@@ -43,9 +56,6 @@ func versionString() string {
 		}
 	}
 
-	if v == "" {
-		v = "unknown"
-	}
 	if len(c) > 12 {
 		c = c[:12] // a short hash is enough to find the commit
 	}
