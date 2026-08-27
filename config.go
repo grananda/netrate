@@ -41,11 +41,11 @@ func defaultMinRun(duration time.Duration) time.Duration {
 
 func DefaultConfig() Config {
 	return Config{
-		URL:      "https://proof.ovh.net/files/10Gb.dat",
+		URL:      "https://speedtest.milkywan.fr/files/1G.iso",
 		Streams:  6,
 		Duration: defaultDuration,
 		WarmUp:   2500 * time.Millisecond,
-		Interval: 100 * time.Millisecond,
+		Interval: 250 * time.Millisecond,
 		MinRun:   defaultMinRun(defaultDuration),
 	}
 }

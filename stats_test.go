@@ -166,7 +166,8 @@ func TestSummarise(t *testing.T) {
 }
 
 func TestSettled(t *testing.T) {
-	cfg := DefaultConfig() // 100ms interval -> a 2s window is 20 samples
+	cfg := DefaultConfig()
+	cfg.Interval = 100 * time.Millisecond // a 2s window is 20 samples at this rate
 
 	flat := make([]float64, 25)
 	for i := range flat {

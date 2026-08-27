@@ -109,7 +109,8 @@ func TestNiceTopOfAnEmptyChart(t *testing.T) {
 }
 
 func TestBucketise(t *testing.T) {
-	cfg := DefaultConfig() // 100ms interval, 14s duration
+	cfg := DefaultConfig()
+	cfg.Interval = 100 * time.Millisecond // the column arithmetic below counts 10 samples per second
 
 	t.Run("an empty history leaves every column unmeasured", func(t *testing.T) {
 		for i, v := range bucketise(nil, cfg.Interval, cfg.Duration, 10) {
@@ -328,6 +329,7 @@ func TestChartPreview(t *testing.T) {
 // shrinks to the time the run actually took.
 func TestChartSpanShrinksToTheRunThatHappened(t *testing.T) {
 	cfg := DefaultConfig()
+	cfg.Interval = 100 * time.Millisecond // 60 readings below stand for 6 seconds at this rate
 	cfg.Duration = 30 * time.Second
 
 	history := make([]float64, 60) // 6 seconds at 100ms

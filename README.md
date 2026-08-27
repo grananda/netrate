@@ -93,7 +93,7 @@ gives the same quality of answer on both.
 -streams   int        concurrent TCP connections (default 6)
 -duration  duration   maximum length of the download phase (default 14s)
 -warmup    duration   leading window discarded from the statistics (default 2.5s)
--interval  duration   sampling period for instantaneous speed (default 100ms)
+-interval  duration   sampling period for instantaneous speed (default 250ms)
 -minrun    duration   keep measuring at least this long before a settled reading
                       may stop the run (default: 45% of -duration)
 -plain                no interface: print the result and exit
