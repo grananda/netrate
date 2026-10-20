@@ -4,8 +4,10 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/mattn/go-isatty"
@@ -59,16 +61,18 @@ func main() {
 		os.Exit(exitUsage)
 	}
 
+	store := defaultHistoryStore()
+
 	// The chart needs a real terminal. IDE run consoles and pipes are not
 	// one, so fall back instead of dying on an opaque /dev/tty error.
 	if *plain || !interactive() {
 		if !*plain {
 			fmt.Fprintln(os.Stderr, "warning: no interactive terminal, falling back to -plain")
 		}
-		os.Exit(runPlain(cfg))
+		os.Exit(runPlain(cfg, store))
 	}
 
-	os.Exit(runTUI(cfg))
+	os.Exit(runTUI(cfg, store))
 }
 
 // flagWasSet reports whether a flag was named on the command line, as opposed
@@ -95,8 +99,9 @@ func isTerminal(f *os.File) bool {
 // runTUI drives the full-screen interface. On failure it does not fall back to runPlain: the
 // model's engine is already downloading by then, and starting a second
 // measurement on top of it would compete for the same link and report nonsense.
-func runTUI(cfg Config) int {
+func runTUI(cfg Config, store historyStore) int {
 	first := newModel(cfg)
+	first.store = store
 
 	final, err := tea.NewProgram(first).Run()
 
@@ -123,7 +128,7 @@ func runTUI(cfg Config) int {
 // Everything that is not the final report goes to stderr, so `speed -plain >
 // out.txt` captures the numbers and nothing else — no carriage returns, no
 // escape codes, no half-drawn progress line.
-func runPlain(cfg Config) int {
+func runPlain(cfg Config, store historyStore) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
@@ -166,7 +171,16 @@ func runPlain(cfg Config) int {
 	}
 
 	printReport(result, cfg)
+	recordPlainRun(store, result, cfg, os.Stderr)
 	return exitOK
+}
+
+// recordPlainRun saves a completed -plain run. A failure is one line on w and
+// never changes the exit code or what the report printed on stdout.
+func recordPlainRun(store historyStore, r Result, cfg Config, w io.Writer) {
+	if _, err := store.save(newRunRecord(r, cfg.URL, time.Now())); err != nil {
+		fmt.Fprintf(w, "warning: history not saved: %v\n", err)
+	}
 }
 
 func printReport(r Result, cfg Config) {
