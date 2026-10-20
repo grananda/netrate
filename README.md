@@ -26,7 +26,7 @@ fast it looked for a moment.
 │  downloaded 371.3 MiB             duration 5.4s  │
 │  streams 6                            CV 0.2%    │
 ╰──────────────────────────────────────────────────╯
-  r run again  ·  q quit
+  r run again  ·  h history  ·  q quit
 ```
 
 The dashed stretch on the x axis is the warm-up, discarded before any statistic
@@ -49,6 +49,9 @@ netrate -plain                   # one report, then exit
 netrate -plain -duration 30s     # measure for longer
 netrate -streams 12              # more parallel connections
 ```
+
+In the full screen interface: `r` runs again, `h` opens the history, and
+`q` or `esc` quits (inside the history, `esc` goes back).
 
 `-plain` keeps stdout to the report alone and sends progress to stderr, so it
 composes in a pipe:
@@ -79,6 +82,28 @@ counting them would understate a fast link.
 settled: both the last two seconds *and* the run as a whole were inside the
 stability threshold. Measuring longer would not have changed the answer. Use
 `-minrun` equal to `-duration` to always spend the whole budget.
+
+## History
+
+Every measurement that completes is saved automatically, whether it was stable
+or not and whether it ran in the interface or with `-plain`. Failed or
+interrupted measurements are not saved. The last 10 are kept.
+
+Press `h` to open the history, which lists each run with its date, median, CV
+and duration, newest first. Press `h` or `esc` to go back. A measurement that is
+still running keeps going while the history is open.
+
+The file is `history.json` under your user config directory:
+
+| System  | Path |
+|---------|------|
+| Linux   | `$XDG_CONFIG_HOME/netrate/history.json` (default `~/.config/netrate/history.json`) |
+| macOS   | `~/Library/Application Support/netrate/history.json` |
+| Windows | `%AppData%\netrate\history.json` |
+
+Credentials in the URL are not stored. If the file cannot be read, it is
+replaced on the next save. If it cannot be written, the result is still shown,
+with a one line warning.
 
 ## Why a duration and not a file size
 

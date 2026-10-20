@@ -94,6 +94,18 @@ type model struct {
 
 	result Result
 	err    error
+
+	// store is where completed runs are kept. The zero value does no IO.
+	store historyStore
+	// historyOpen shows the history in place of the measurement. It is separate
+	// from state, which drives the engine, "r" and the exit code.
+	historyOpen bool
+	// pastRuns are the stored measurements, oldest first, as last loaded or saved.
+	pastRuns []runRecord
+	// pastRunsErr is set when the last load of the history failed.
+	pastRunsErr error
+	// saveErr is set when this run's record could not be saved.
+	saveErr error
 }
 
 func newModel(cfg Config) model {
@@ -121,6 +133,7 @@ func (m model) restart() (model, tea.Cmd) {
 	next := newModel(m.cfg)
 	next.epoch = m.epoch + 1
 	next.width = m.width
+	next.store = m.store
 	return next, next.Init()
 }
 
@@ -139,10 +152,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "q", "esc", "ctrl+c":
+		case "q", "ctrl+c":
 			m.cancel()
 			return m, tea.Quit
+		case "esc":
+			// Inside the history, esc goes back; anywhere else it quits.
+			if m.historyOpen {
+				m.historyOpen = false
+				return m, nil
+			}
+			m.cancel()
+			return m, tea.Quit
+		case "h":
+			if m.historyOpen {
+				m.historyOpen = false
+			} else {
+				m = m.openHistory()
+			}
+			return m, nil
 		case "r":
+			if m.historyOpen {
+				return m, nil
+			}
 			if m.state != stateRunning {
 				return m.restart()
 			}
@@ -157,6 +188,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m = m.applyEvent(msg.ev)
+		// Saved here, synchronously: the file is tiny and written once per run,
+		// and a pending Cmd could be dropped by an immediate quit.
+		if ev, ok := msg.ev.(DoneEvent); ok {
+			m = m.recordRun(ev.Result, time.Now())
+		}
 		return m, listen(m.events, m.epoch)
 
 	case closedMsg:
@@ -176,6 +212,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+// recordRun saves a completed run. A failure is kept for the view to warn about
+// and never changes the run's outcome.
+func (m model) recordRun(r Result, at time.Time) model {
+	runs, err := m.store.save(newRunRecord(r, m.cfg.URL, at))
+	if err != nil {
+		m.saveErr = err
+		return m
+	}
+	m.pastRuns, m.pastRunsErr = runs, nil
+	return m
+}
+
+// openHistory re-reads the file on every open, which picks up runs saved by
+// other instances.
+func (m model) openHistory() model {
+	m.pastRuns, m.pastRunsErr = m.store.load()
+	m.historyOpen = true
+	return m
 }
 
 func (m model) applyEvent(ev Event) model {
@@ -225,10 +281,21 @@ func appendCapped(series []float64, v float64, limit int) []float64 {
 func (m model) View() string {
 	width := m.viewWidth()
 
+	if m.historyOpen {
+		return boxStyle.Render(m.historyView(width)) + "\n" +
+			helpStyle.Render("  h/esc back  ·  q quit") + "\n"
+	}
+
 	var b strings.Builder
 	b.WriteString(spread(width, titleStyle.Render(appName), m.statusLine()))
 	b.WriteString("\n\n")
-	b.WriteString(spread(width, m.headline(), m.headlineDetail()))
+	headline, detail := m.headline(), m.headlineDetail()
+	if m.state == stateDone && lipgloss.Width(headline)+1+lipgloss.Width(detail) > width {
+		// On the narrowest box the full sentence overflows it; keep the part
+		// that matters rather than let the border break.
+		detail = statStyle.Render(fmt.Sprintf("CV %.1f%%", m.result.CV))
+	}
+	b.WriteString(spread(width, headline, detail))
 	b.WriteString("\n\n")
 
 	for _, row := range renderChart(m.history, m.cfg, m.chartSpan(), width) {
@@ -242,11 +309,88 @@ func (m model) View() string {
 		b.WriteString("\n" + errStyle.Render("✗ "+m.errorText()))
 	}
 
-	help := "q quit"
+	help := "h history  ·  q quit"
 	if m.state != stateRunning {
-		help = "r run again  ·  q quit"
+		help = "r run again  ·  h history  ·  q quit"
 	}
-	return boxStyle.Render(b.String()) + "\n" + helpStyle.Render("  "+help) + "\n"
+	out := boxStyle.Render(b.String()) + "\n"
+	if m.saveErr != nil {
+		// Below the box, where the border and padding do not eat the line.
+		out += warnStyle.MaxWidth(width+boxChrome).Render(saveWarning(saveFailureReason(m.saveErr), width+boxChrome)) + "\n"
+	}
+	return out + helpStyle.Render("  "+help) + "\n"
+}
+
+// historyView is the box content of the history: the same header as the
+// measurement, so live progress stays visible, then one row per stored run.
+func (m model) historyView(width int) string {
+	var b strings.Builder
+	b.WriteString(spread(width, titleStyle.Render(appName), m.statusLine()))
+	b.WriteString("\n\n" + strongStyle.Render("history") + "\n\n")
+
+	switch {
+	case m.pastRunsErr != nil:
+		b.WriteString(warnStyle.MaxWidth(width).Render("⚠ history file could not be read"))
+	case len(m.pastRuns) == 0:
+		b.WriteString(statStyle.Render("no measurements saved yet"))
+	default:
+		b.WriteString(strings.Join(historyRows(m.pastRuns, width), "\n"))
+	}
+	return b.String()
+}
+
+// historyRows lays the runs out newest first. Columns are added in priority
+// order (date, median, CV, duration) for as long as they fit width, so a narrow
+// terminal loses detail rather than alignment.
+func historyRows(runs []runRecord, width int) []string {
+	const gap = 2
+
+	cols := [4][]string{}
+	for i := len(runs) - 1; i >= 0; i-- {
+		rec := runs[i]
+		mark := warnStyle.Render("⚠")
+		if rec.Stable {
+			mark = okStyle.Render("✓")
+		}
+		cols[0] = append(cols[0], rec.At.Local().Format("2006-01-02 15:04"))
+		cols[1] = append(cols[1], formatMbps(rec.MedianMbps))
+		cols[2] = append(cols[2], fmt.Sprintf("CV %.1f%% ", rec.CVPercent)+mark)
+		cols[3] = append(cols[3], fmt.Sprintf("%.1fs", rec.DurationSeconds))
+	}
+
+	widths := [4]int{}
+	for c := range cols {
+		for _, cell := range cols[c] {
+			widths[c] = max(widths[c], lipgloss.Width(cell))
+		}
+	}
+
+	// Date and median always stay: together they are under the minimum width.
+	shown, total := 2, widths[0]+gap+widths[1]
+	for shown < len(cols) && total+gap+widths[shown] <= width {
+		total += gap + widths[shown]
+		shown++
+	}
+
+	rows := make([]string, len(cols[0]))
+	for i := range rows {
+		var line strings.Builder
+		for c := 0; c < shown; c++ {
+			cell := cols[c][i]
+			pad := strings.Repeat(" ", widths[c]-lipgloss.Width(cell))
+			switch c {
+			case 0, 2:
+				line.WriteString(cell + pad)
+			default:
+				line.WriteString(pad + cell)
+			}
+			if c < shown-1 {
+				line.WriteString(strings.Repeat(" ", gap))
+			}
+		}
+		rows[i] = line.String()
+	}
+	return rows
 }
 
 // chartSpan is what the x axis should cover. A live run is plotted against its
@@ -370,4 +514,14 @@ func spread(width int, left, right string) string {
 		gap = 1
 	}
 	return left + strings.Repeat(" ", gap) + right
+}
+
+// saveWarning builds the one-line "history not saved" warning. It keeps the
+// words "history not saved" and drops the icon before it would cut the reason.
+func saveWarning(reason string, width int) string {
+	msg := "history not saved: " + reason
+	if lipgloss.Width("⚠ "+msg) <= width {
+		return "⚠ " + msg
+	}
+	return msg
 }
