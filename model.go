@@ -78,6 +78,9 @@ type model struct {
 	// width is the usable width inside the box, learnt from the terminal.
 	width int
 
+	// height is the terminal height from the last WindowSizeMsg, 0 until known.
+	height int
+
 	// The engine's lifetime is the model's lifetime, so the context and its
 	// event channel are built with the model and never reassigned. Init has
 	// a value receiver and could not set them anyway.
@@ -133,6 +136,7 @@ func (m model) restart() (model, tea.Cmd) {
 	next := newModel(m.cfg)
 	next.epoch = m.epoch + 1
 	next.width = m.width
+	next.height = m.height
 	next.store = m.store
 	return next, next.Init()
 }
@@ -181,6 +185,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.WindowSizeMsg:
 		m.width = clampViewWidth(msg.Width - boxChrome)
+		m.height = msg.Height
 		return m, nil
 
 	case engineMsg:
@@ -282,8 +287,16 @@ func (m model) View() string {
 	width := m.viewWidth()
 
 	if m.historyOpen {
-		return boxStyle.Render(m.historyView(width)) + "\n" +
-			helpStyle.Render("  h/esc back  ·  q quit") + "\n"
+		// Rows get a blank line between them when the chart is shown and the
+		// whole screen still fits the terminal. The line count is Bubble Tea's
+		// (its renderer drops the top lines of a taller view); an unknown
+		// height counts as fitting.
+		spaced := m.pastRunsErr == nil && historyChartCells(m.pastRuns, width) > 0
+		out := m.historyScreen(width, spaced)
+		if spaced && m.height > 0 && strings.Count(out, "\n")+1 > m.height {
+			out = m.historyScreen(width, false)
+		}
+		return out
 	}
 
 	var b strings.Builder
@@ -323,7 +336,7 @@ func (m model) View() string {
 
 // historyView is the box content of the history: the same header as the
 // measurement, so live progress stays visible, then one row per stored run.
-func (m model) historyView(width int) string {
+func (m model) historyView(width int, spaced bool) string {
 	var b strings.Builder
 	b.WriteString(spread(width, titleStyle.Render(appName), m.statusLine()))
 	b.WriteString("\n\n" + strongStyle.Render("history") + "\n\n")
@@ -334,18 +347,71 @@ func (m model) historyView(width int) string {
 	case len(m.pastRuns) == 0:
 		b.WriteString(statStyle.Render("no measurements saved yet"))
 	default:
-		b.WriteString(strings.Join(historyRows(m.pastRuns, width), "\n"))
+		sep := "\n"
+		if spaced {
+			sep = "\n\n"
+		}
+		b.WriteString(strings.Join(historyRows(m.pastRuns, width), sep))
 	}
 	return b.String()
 }
 
-// historyRows lays the runs out newest first. Columns are added in priority
-// order (date, median, CV, duration) for as long as they fit width, so a narrow
-// terminal loses detail rather than alignment.
-func historyRows(runs []runRecord, width int) []string {
-	const gap = 2
+// historyScreen is the whole history screen: the box and its help line.
+func (m model) historyScreen(width int, spaced bool) string {
+	return boxStyle.Render(m.historyView(width, spaced)) + "\n" +
+		helpStyle.Render("  h/esc back  ·  q quit") + "\n"
+}
 
-	cols := [4][]string{}
+// historyGap separates the columns of a history row.
+const historyGap = 2
+
+// historyRows lays the runs out newest first. Every row keeps its date, median,
+// CV and duration; the bar chart takes only the width left over and is dropped
+// first, below minHistoryBarCells, where the rows are the plain text list that
+// drops columns in priority order (date, median, CV, duration) for as long as
+// they fit width, so a narrow terminal loses detail rather than alignment.
+func historyRows(runs []runRecord, width int) []string {
+	cols, widths := historyCells(runs)
+
+	cells := historyChartCells(runs, width)
+	if cells == 0 {
+		return historyTextRows(cols, widths, width)
+	}
+	top := historyScale(runs)
+
+	pad := func(c, i int) string { return strings.Repeat(" ", widths[c]-lipgloss.Width(cols[c][i])) }
+	gap := strings.Repeat(" ", historyGap)
+	rows := make([]string, len(cols[0]))
+	for i := range rows {
+		rec := runs[len(runs)-1-i]
+		rows[i] = cols[0][i] + pad(0, i) + gap +
+			renderBar(rec, top, cells) + gap +
+			pad(1, i) + cols[1][i] + gap +
+			cols[2][i] + pad(2, i) + gap +
+			pad(3, i) + cols[3][i]
+	}
+	return rows
+}
+
+// historyChartCells is the width of the bar chart at width, or 0 when the chart
+// is omitted: no run has a median above 0, or the space left after the text
+// columns is under minHistoryBarCells.
+func historyChartCells(runs []runRecord, width int) int {
+	if historyScale(runs) <= 0 {
+		return 0
+	}
+	_, widths := historyCells(runs)
+	textTotal := widths[0] + widths[1] + widths[2] + widths[3] + 3*historyGap
+	cells := width - textTotal - historyGap
+	if cells < minHistoryBarCells {
+		return 0
+	}
+	return cells
+}
+
+// historyCells renders the four text columns of every run, newest first, and
+// measures each.
+func historyCells(runs []runRecord) (cols [4][]string, widths [4]int) {
 	for i := len(runs) - 1; i >= 0; i-- {
 		rec := runs[i]
 		mark := warnStyle.Render("⚠")
@@ -357,18 +423,20 @@ func historyRows(runs []runRecord, width int) []string {
 		cols[2] = append(cols[2], fmt.Sprintf("CV %.1f%% ", rec.CVPercent)+mark)
 		cols[3] = append(cols[3], fmt.Sprintf("%.1fs", rec.DurationSeconds))
 	}
-
-	widths := [4]int{}
 	for c := range cols {
 		for _, cell := range cols[c] {
 			widths[c] = max(widths[c], lipgloss.Width(cell))
 		}
 	}
+	return cols, widths
+}
 
+// historyTextRows joins the columns that fit width.
+func historyTextRows(cols [4][]string, widths [4]int, width int) []string {
 	// Date and median always stay: together they are under the minimum width.
-	shown, total := 2, widths[0]+gap+widths[1]
-	for shown < len(cols) && total+gap+widths[shown] <= width {
-		total += gap + widths[shown]
+	shown, total := 2, widths[0]+historyGap+widths[1]
+	for shown < len(cols) && total+historyGap+widths[shown] <= width {
+		total += historyGap + widths[shown]
 		shown++
 	}
 
@@ -385,7 +453,7 @@ func historyRows(runs []runRecord, width int) []string {
 				line.WriteString(pad + cell)
 			}
 			if c < shown-1 {
-				line.WriteString(strings.Repeat(" ", gap))
+				line.WriteString(strings.Repeat(" ", historyGap))
 			}
 		}
 		rows[i] = line.String()

@@ -93,6 +93,14 @@ Press `h` to open the history, which lists each run with its date, median, CV
 and duration, newest first. Press `h` or `esc` to go back. A measurement that is
 still running keeps going while the history is open.
 
+Between the date and the median, each run has a bar. Bars are white and
+textured, and scaled to the fastest of the runs shown, so they compare at a
+glance. The bar is `▓` below the run's min and `▒` from its min to its median,
+and a thin grey line after the bar reaches its max. An unstable run is one shade
+lighter, besides its `⚠`. When the terminal is tall enough, a blank line
+separates the runs. On a narrow terminal (under about 63 columns) the bars are
+left out and the list shows the date, median, CV and duration only.
+
 The file is `history.json` under your user config directory:
 
 | System  | Path |

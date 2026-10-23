@@ -537,8 +537,9 @@ func TestHistoryRowsColumnDropping(t *testing.T) {
 			t.Errorf("narrow row lost the date: %q", row)
 		}
 	}
-	// Middle width: CV fits, duration does not.
-	mid := historyRows(runs, lipgloss.Width(full[0])-1)
+	// Middle width: CV fits, duration does not. 44 is one short of the text-only
+	// row (45); at 79 the chart now just gets shorter.
+	mid := historyRows(runs, 44)
 	if !strings.Contains(mid[0], "CV") || strings.Contains(mid[0], "5.5s") {
 		t.Errorf("mid row should drop only duration: %q", mid[0])
 	}
@@ -561,5 +562,221 @@ func TestSaveFailureReasonLinkError(t *testing.T) {
 	le := &os.LinkError{Op: "rename", Old: "/a/long/tmp-123", New: "/a/long/history.json", Err: syscall.EISDIR}
 	if got, want := saveFailureReason(fmt.Errorf("save: %w", le)), syscall.EISDIR.Error(); got != want {
 		t.Errorf("link error: got %q, want %q (no paths)", got, want)
+	}
+}
+
+// barGlyphs are the block glyphs of a bar. The thin line of the range is left
+// out because the box border also uses it.
+const barGlyphs = "▓▒░▏▎▍▌▋▊▉█"
+
+func hasBarGlyphs(row string) bool { return strings.ContainsAny(row, barGlyphs) }
+
+func plainRows(rows []string) []string {
+	out := make([]string, len(rows))
+	for i, r := range rows {
+		out[i] = stripANSI(r)
+	}
+	return out
+}
+
+// AC-1, AC-4, AC-5, AC-8, AC-13, AC-16
+func TestHistoryRowsChart(t *testing.T) {
+	d1 := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
+	d2 := time.Date(2026, 1, 2, 10, 0, 0, 0, time.UTC)
+	d3 := time.Date(2026, 1, 3, 10, 0, 0, 0, time.UTC)
+	r1, r2, r3 := testRecord(d1, 100), testRecord(d2, 400), testRecord(d3, 50)
+	r2.Stable = false
+	const width, cells = 100, 53
+
+	raw := historyRows([]runRecord{r1, r2, r3}, width)
+	if len(raw) != 3 {
+		t.Fatalf("rows = %d, want 3", len(raw))
+	}
+	for i, row := range raw {
+		if w := lipgloss.Width(row); w != width {
+			t.Errorf("row %d is %d cells, want %d", i, w, width)
+		}
+	}
+	rows := plainRows(raw)
+
+	// AC-8: newest first.
+	for i, rec := range []runRecord{r3, r2, r1} {
+		if want := rec.At.Local().Format(dateLayout); !strings.HasPrefix(rows[i], want) {
+			t.Errorf("row %d = %q, want it to start with %s", i, rows[i], want)
+		}
+	}
+
+	medianCol := -1
+	for i, row := range rows {
+		rs := []rune(row)
+		if len(rs) != width {
+			t.Fatalf("row %d has %d runes, want %d: %q", i, len(rs), width, row)
+		}
+		// AC-13: same chart area and gaps on every row.
+		if got := string(rs[16:18]); got != "  " {
+			t.Errorf("row %d: gap after the date is %q", i, got)
+		}
+		for _, r := range string(rs[18 : 18+cells]) {
+			if !strings.ContainsRune(barGlyphs+"─ ", r) {
+				t.Errorf("row %d: chart area holds %q: %q", i, r, string(rs[18:18+cells]))
+				break
+			}
+		}
+		if got := string(rs[18+cells : 18+cells+2]); got != "  " {
+			t.Errorf("row %d: gap after the chart is %q", i, got)
+		}
+		col := strings.Index(string(rs[18+cells:]), "Mbps")
+		if medianCol < 0 {
+			medianCol = col
+		} else if col != medianCol {
+			t.Errorf("row %d: the median ends at column %d, others at %d", i, col, medianCol)
+		}
+	}
+
+	// AC-1, AC-12: the fastest fills the chart with whole-cell shade glyphs.
+	fastest := string([]rune(rows[1])[18 : 18+cells])
+	if n := len([]rune(fastest)); n != cells {
+		t.Errorf("fastest row chart has %d cells, want %d", n, cells)
+	}
+	for _, r := range fastest {
+		if !strings.ContainsRune("▓▒░", r) {
+			t.Errorf("fastest row chart holds %q (no partial block or space expected): %q", r, fastest)
+			break
+		}
+	}
+	if want := stripANSI(renderBar(r2, 400, cells)); fastest != want {
+		t.Errorf("fastest row chart = %q, want %q", fastest, want)
+	}
+	// AC-1, AC-4: the bar is the one renderBar draws on the scale of 400.
+	if want := stripANSI(renderBar(r1, 400, cells)); !strings.Contains(rows[2], want) {
+		t.Errorf("row for 100 = %q, want it to contain the bar %q", rows[2], want)
+	}
+	if want := stripANSI(renderBar(r3, 400, cells)); !strings.Contains(rows[0], want) {
+		t.Errorf("row for 50 = %q, want it to contain the bar %q", rows[0], want)
+	}
+
+	// AC-5, AC-16: every field of the text view stays.
+	for i, rec := range []runRecord{r3, r2, r1} {
+		mark := "✓"
+		if !rec.Stable {
+			mark = "⚠"
+		}
+		for _, want := range []string{formatMbps(rec.MedianMbps), "CV 1.5% " + mark, "5.5s"} {
+			if !strings.Contains(rows[i], want) {
+				t.Errorf("row %d = %q lacks %q", i, rows[i], want)
+			}
+		}
+	}
+}
+
+// AC-6, AC-15, AC-16
+func TestHistoryRowsChartThreshold(t *testing.T) {
+	d1 := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
+	d2 := time.Date(2026, 1, 2, 10, 0, 0, 0, time.UTC)
+	runs := []runRecord{testRecord(d1, 100), testRecord(d2, 200)}
+	text := func(rec runRecord, median string) string {
+		return rec.At.Local().Format(dateLayout) + "  " + median + "  CV 1.5% ✓  5.5s"
+	}
+
+	t.Run("one cell short of the minimum chart is today's text row", func(t *testing.T) {
+		rows := plainRows(historyRows(runs, 54))
+		want := []string{text(runs[1], "200.0 Mbps"), text(runs[0], "100.0 Mbps")}
+		for i := range want {
+			if rows[i] != want[i] {
+				t.Errorf("row %d = %q, want exactly %q", i, rows[i], want[i])
+			}
+		}
+	})
+
+	t.Run("the minimum chart width draws an 8-cell chart", func(t *testing.T) {
+		raw := historyRows(runs, 55)
+		for i, row := range raw {
+			if w := lipgloss.Width(row); w != 55 {
+				t.Errorf("row %d is %d cells, want 55", i, w)
+			}
+		}
+		rows := plainRows(raw)
+		if got := string([]rune(rows[0])[18:26]); got != "▓▓▓▓▒▒▒▒" {
+			t.Errorf("top row chart = %q, want %q", got, "▓▓▓▓▒▒▒▒")
+		}
+		if !hasBarGlyphs(rows[1]) {
+			t.Errorf("row %q has no bar", rows[1])
+		}
+	})
+
+	t.Run("every width from 32 to 100", func(t *testing.T) {
+		for w := 32; w <= 100; w++ {
+			rows := plainRows(historyRows(runs, w))
+			bars := 0
+			for i, row := range rows {
+				if got := lipgloss.Width(row); got > w {
+					t.Fatalf("width %d: row %d is %d cells", w, i, got)
+				}
+				if hasBarGlyphs(row) {
+					bars++
+				}
+			}
+			switch {
+			case w < 55 && bars != 0:
+				t.Errorf("width %d: %d rows have a bar, want none below 55", w, bars)
+			case w >= 55 && bars != len(rows):
+				t.Errorf("width %d: %d of %d rows have a bar, want all", w, bars, len(rows))
+			}
+		}
+	})
+}
+
+// AC-12, AC-7
+func TestHistoryRowsWithoutPositiveMedian(t *testing.T) {
+	d1 := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
+	d2 := time.Date(2026, 1, 2, 10, 0, 0, 0, time.UTC)
+
+	t.Run("no row has a bar", func(t *testing.T) {
+		rows := plainRows(historyRows([]runRecord{testRecord(d1, 0), testRecord(d2, 0)}, 100))
+		if len(rows) != 2 {
+			t.Fatalf("rows = %d, want 2", len(rows))
+		}
+		for i, row := range rows {
+			if hasBarGlyphs(row) {
+				t.Errorf("row %d has a bar: %q", i, row)
+			}
+			if !strings.Contains(row, "0.00 Mbps") {
+				t.Errorf("row %d lacks the median: %q", i, row)
+			}
+		}
+	})
+
+	t.Run("a zero among positive medians draws no bar", func(t *testing.T) {
+		rows := plainRows(historyRows([]runRecord{testRecord(d1, 0), testRecord(d2, 80)}, 100))
+		const cells = 53
+		got := string([]rune(rows[0])[18 : 18+cells])
+		want := stripANSI(renderBar(testRecord(d2, 80), 80, cells))
+		if got != want || strings.Contains(got, " ") || len([]rune(got)) != cells {
+			t.Errorf("the 80 row chart = %q, want %d whole-cell glyphs equal to %q", got, cells, want)
+		}
+		if got := string([]rune(rows[1])[18 : 18+cells]); got != strings.Repeat(" ", cells) {
+			t.Errorf("the 0 row chart = %q, want spaces", got)
+		}
+	})
+}
+
+// AC-10
+func TestReadmeDescribesHistoryChart(t *testing.T) {
+	data, err := os.ReadFile("README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := string(data)
+	_, section, ok := strings.Cut(doc, "## History")
+	if !ok {
+		t.Fatal("README has no History section")
+	}
+	if end := strings.Index(section, "\n## "); end >= 0 {
+		section = section[:end]
+	}
+	for _, want := range []string{"bar", "min", "max", "unstable", "white"} {
+		if !strings.Contains(section, want) {
+			t.Errorf("README History section does not mention %q", want)
+		}
 	}
 }
