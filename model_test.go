@@ -858,3 +858,317 @@ func TestSaveWarningShowsOSReasonsInFull(t *testing.T) {
 		})
 	}
 }
+
+// chartMedians are spread over every colour of the ramp and over every unit.
+var chartMedians = []float64{0.5, 9.99, 55, 99.99, 140, 600, 870, 1234.5, 2500, 12345}
+
+// checkHistoryChart checks the open history view of m, which is expected to
+// hold the 10 records recs (oldest first).
+func checkHistoryChart(t *testing.T, m model, recs []runRecord, label string) (bars int) {
+	t.Helper()
+	view := m.View()
+	limit := m.viewWidth() + boxChrome
+	for _, l := range strings.Split(view, "\n") {
+		if got := lipgloss.Width(l); got > limit {
+			t.Fatalf("%s: line is %d columns, limit %d: %q", label, got, limit, l)
+		}
+	}
+	lines := recordLines(view)
+	if len(lines) != len(recs) {
+		t.Fatalf("%s: %d record lines, want %d", label, len(lines), len(recs))
+	}
+	for i, l := range lines {
+		rec := recs[len(recs)-1-i]
+		plain := stripANSI(l)
+		if !strings.Contains(plain, rec.At.Local().Format(dateLayout)) {
+			t.Fatalf("%s: line %d lacks its date: %q", label, i, plain)
+		}
+		if !strings.Contains(plain, formatMbps(rec.MedianMbps)) {
+			t.Fatalf("%s: line %d lacks its median: %q", label, i, plain)
+		}
+		if hasBarGlyphs(plain) {
+			bars++
+		}
+	}
+	if bars != 0 && bars != len(lines) {
+		t.Fatalf("%s: %d of %d lines have a bar, want all or none", label, bars, len(lines))
+	}
+	return bars
+}
+
+// AC-5, AC-6, AC-13, AC-15
+func TestHistoryChartFitsEveryWidth(t *testing.T) {
+	for w := minViewWidth + boxChrome; w <= maxViewWidth+boxChrome; w++ {
+		m := newTestModel(t)
+		var recs []runRecord
+		for i, median := range chartMedians {
+			rec := testRecord(time.Now().Add(-time.Duration(10-i)*24*time.Hour), median)
+			rec.CVPercent, rec.DurationSeconds, rec.Stable = 123.4, 300.0, i%2 == 0
+			if i == 5 {
+				rec.MaxMbps = median * 5
+			}
+			recs = append(recs, rec)
+		}
+		seedRecords(t, m.store, recs...)
+		m = update(t, m, tea.WindowSizeMsg{Width: w, Height: 40})
+		m, _ = press(t, m, keyRunes("h"))
+
+		bars := checkHistoryChart(t, m, recs, fmt.Sprintf("width %d", w))
+		switch m.viewWidth() {
+		case maxViewWidth:
+			if bars == 0 {
+				t.Fatalf("width %d: no chart at the maximum width", w)
+			}
+		case minViewWidth:
+			if bars != 0 {
+				t.Fatalf("width %d: chart at the minimum width", w)
+			}
+		}
+
+		// AC-15: resize while the view is open.
+		other := (minViewWidth + boxChrome + maxViewWidth + boxChrome) - w
+		m = update(t, m, tea.WindowSizeMsg{Width: other, Height: 40})
+		if !m.historyOpen {
+			t.Fatalf("width %d: the resize closed the history", w)
+		}
+		checkHistoryChart(t, m, recs, fmt.Sprintf("width %d resized to %d", w, other))
+	}
+}
+
+// AC-17, AC-8
+func TestHistoryChartRescalesOnNewRun(t *testing.T) {
+	m := newTestModel(t)
+	m = update(t, m, tea.WindowSizeMsg{Width: 106, Height: 40})
+	recs := seedDays(t, m.store, 10)
+	m, _ = press(t, m, keyRunes("h"))
+	m = update(t, m, done(m, Result{Median: 500, Min: 500, Max: 500, CV: 1, Stable: true, Duration: 5500 * time.Millisecond}))
+
+	if !m.historyOpen {
+		t.Fatal("the view closed itself when the run finished")
+	}
+	lines := recordLines(m.View())
+	if len(lines) != 10 {
+		t.Fatalf("got %d record lines, want 10:\n%s", len(lines), m.View())
+	}
+	first := stripANSI(lines[0])
+	if !strings.Contains(first, formatMbps(500)) {
+		t.Fatalf("first line = %q, want the new run", first)
+	}
+	// 100 columns: date 16, median 10, "CV x.x% m" 9, duration 4, 3 gaps of 2.
+	const n = 100 - (16 + 10 + 9 + 4 + 6) - 2
+	if !strings.Contains(first, strings.Repeat("▓", n)) {
+		t.Errorf("the new fastest run does not fill the chart with ▓ (%d cells): %q", n, first)
+	}
+	rec190 := recs[9]
+	var line190 string
+	for _, l := range lines {
+		if strings.Contains(l, rec190.At.Local().Format(dateLayout)) {
+			line190 = stripANSI(l)
+		}
+	}
+	if line190 == "" {
+		t.Fatalf("the 190 run is not in the view:\n%s", m.View())
+	}
+	if want := stripANSI(renderBar(rec190, 500, n)); !strings.Contains(line190, want) {
+		t.Errorf("the 190 line = %q, want the bar rescaled to 500: %q", line190, want)
+	}
+	for _, l := range lines {
+		if strings.Contains(l, recs[0].At.Local().Format(dateLayout)) {
+			t.Errorf("the oldest run is still shown: %q", l)
+		}
+	}
+}
+
+// AC-18
+func TestHistoryViewWithoutRecordsHasNoChart(t *testing.T) {
+	cases := []struct {
+		name    string
+		prepare func(*testing.T, historyStore)
+		want    string
+	}{
+		{"missing file", func(*testing.T, historyStore) {}, "no measurements saved yet"},
+		{"empty list", func(t *testing.T, s historyStore) { seedRaw(t, s, `{"version":1,"measurements":[]}`) }, "no measurements saved yet"},
+		{"not json", func(t *testing.T, s historyStore) { seedRaw(t, s, "not json") }, "history file could not be read"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			m := newTestModel(t)
+			tt.prepare(t, m.store)
+			m = update(t, m, tea.WindowSizeMsg{Width: 106, Height: 40})
+			m, _ = press(t, m, keyRunes("h"))
+			view := stripANSI(m.View())
+			if !strings.Contains(view, tt.want) {
+				t.Errorf("view lacks %q:\n%s", tt.want, view)
+			}
+			if hasBarGlyphs(view) {
+				t.Errorf("view has bar glyphs:\n%s", view)
+			}
+		})
+	}
+}
+
+// blankLine reports whether a view line holds nothing but the box border.
+func blankLine(l string) bool {
+	return strings.TrimSpace(strings.ReplaceAll(stripANSI(l), "│", "")) == ""
+}
+
+func viewLines(view string) []string { return strings.Split(view, "\n") }
+
+// recordIndexes are the positions of the record lines in the view.
+func recordIndexes(view string) []int {
+	var out []int
+	for i, l := range viewLines(view) {
+		if dateRE.MatchString(l) {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
+// requireSpacing checks that the 10 (or n) record lines are separated by
+// exactly one blank line (spaced) or by nothing (compact).
+func requireSpacing(t *testing.T, view string, spaced bool, label string) {
+	t.Helper()
+	idx := recordIndexes(view)
+	lines := viewLines(view)
+	for i := 1; i < len(idx); i++ {
+		gap := idx[i] - idx[i-1]
+		if !spaced {
+			if gap != 1 {
+				t.Errorf("%s: record lines %d and %d are %d lines apart, want consecutive", label, i-1, i, gap)
+			}
+			continue
+		}
+		if gap != 2 || !blankLine(lines[idx[i-1]+1]) {
+			t.Errorf("%s: record lines %d and %d are %d lines apart (blank between: %v), want exactly one blank line", label, i-1, i, gap, gap == 2)
+		}
+	}
+}
+
+// AC-20, AC-8, AC-15
+func TestHistoryViewSpacesChartRows(t *testing.T) {
+	open := func(t *testing.T, days, width, height int) (model, []runRecord) {
+		t.Helper()
+		m := newTestModel(t)
+		recs := seedDays(t, m.store, days)
+		m = update(t, m, tea.WindowSizeMsg{Width: width, Height: height})
+		m, _ = press(t, m, keyRunes("h"))
+		return m, recs
+	}
+	lineTotal := func(view string) int { return strings.Count(view, "\n") + 1 }
+
+	t.Run("AC-20 a tall terminal separates the rows with one blank line", func(t *testing.T) {
+		m, recs := open(t, 10, 106, 40)
+		view := m.View()
+		idx := recordIndexes(view)
+		if len(idx) != 10 {
+			t.Fatalf("%d record lines, want 10:\n%s", len(idx), view)
+		}
+		lines := viewLines(view)
+		for i, ix := range idx { // AC-8: newest first
+			rec := recs[len(recs)-1-i]
+			if !strings.Contains(stripANSI(lines[ix]), rec.At.Local().Format(dateLayout)) {
+				t.Errorf("record line %d = %q, want the run of %s", i, lines[ix], rec.At.Local().Format(dateLayout))
+			}
+		}
+		requireSpacing(t, view, true, "height 40")
+		if n := lineTotal(view); n > 40 {
+			t.Errorf("the screen has %d lines, over the height 40", n)
+		}
+	})
+
+	t.Run("AC-20 a resize re-decides the spacing", func(t *testing.T) {
+		m, _ := open(t, 10, 106, 40)
+		n := lineTotal(m.View())
+		m = update(t, m, tea.WindowSizeMsg{Width: 106, Height: n})
+		requireSpacing(t, m.View(), true, fmt.Sprintf("height %d (just fits)", n))
+		if got := lineTotal(m.View()); got != n {
+			t.Errorf("spaced screen is %d lines at height %d, was %d", got, n, n)
+		}
+		m = update(t, m, tea.WindowSizeMsg{Width: 106, Height: n - 1})
+		view := m.View()
+		requireSpacing(t, view, false, fmt.Sprintf("height %d (one short)", n-1))
+		if got := lineTotal(view); got > n-1 {
+			t.Errorf("compact screen is %d lines, over the height %d", got, n-1)
+		}
+		m = update(t, m, tea.WindowSizeMsg{Width: 106, Height: 40})
+		requireSpacing(t, m.View(), true, "height back to 40")
+	})
+
+	t.Run("AC-20 a short terminal keeps 10 records compact, 5 spaced", func(t *testing.T) {
+		m, _ := open(t, 10, 106, 24)
+		view := m.View()
+		if got := len(recordIndexes(view)); got != 10 {
+			t.Fatalf("%d record lines, want 10", got)
+		}
+		requireSpacing(t, view, false, "10 records at height 24")
+		if n := lineTotal(view); n > 24 {
+			t.Errorf("compact screen is %d lines, over the height 24", n)
+		}
+
+		m, _ = open(t, 5, 106, 24)
+		view = m.View()
+		if got := len(recordIndexes(view)); got != 5 {
+			t.Fatalf("%d record lines, want 5", got)
+		}
+		requireSpacing(t, view, true, "5 records at height 24")
+		if n := lineTotal(view); n > 24 {
+			t.Errorf("spaced screen is %d lines, over the height 24", n)
+		}
+	})
+
+	t.Run("AC-20 an unknown height counts as fitting", func(t *testing.T) {
+		m, _ := open(t, 10, 106, 0)
+		requireSpacing(t, m.View(), true, "height 0")
+	})
+
+	t.Run("AC-20 AC-15 text-only rows are never spaced", func(t *testing.T) {
+		m, recs := open(t, 10, 60, 40)
+		if got := m.viewWidth(); got != 54 {
+			t.Fatalf("viewWidth = %d, want 54", got)
+		}
+		view := m.View()
+		requireSpacing(t, view, false, "width 60")
+		if hasBarGlyphs(stripANSI(view)) {
+			t.Errorf("a bar is drawn without room for the chart:\n%s", view)
+		}
+		want := plainRows(historyRows(recs, 54))
+		lines := viewLines(view)
+		idx := recordIndexes(view)
+		if len(idx) != len(want) {
+			t.Fatalf("%d record lines, want %d", len(idx), len(want))
+		}
+		for i, ix := range idx {
+			if got := stripANSI(lines[ix]); !strings.Contains(got, strings.TrimSpace(want[i])) {
+				t.Errorf("record line %d = %q, want today's text row %q", i, got, want[i])
+			}
+		}
+	})
+
+	t.Run("AC-20 AC-8 a finished run keeps the spacing, r does nothing", func(t *testing.T) {
+		m, _ := open(t, 10, 106, 40)
+		m = update(t, m, done(m, Result{Median: 500, Min: 500, Max: 500, CV: 1, Stable: true, Duration: 5500 * time.Millisecond}))
+		if !m.historyOpen {
+			t.Fatal("the view closed itself when the run finished")
+		}
+		view := m.View()
+		idx := recordIndexes(view)
+		if len(idx) != 10 {
+			t.Fatalf("%d record lines, want 10:\n%s", len(idx), view)
+		}
+		if first := stripANSI(viewLines(view)[idx[0]]); !strings.Contains(first, formatMbps(500)) {
+			t.Errorf("first record line = %q, want the new run", first)
+		}
+		requireSpacing(t, view, true, "after the run")
+		if n := lineTotal(view); n > 40 {
+			t.Errorf("the screen has %d lines, over the height 40", n)
+		}
+
+		epoch := m.epoch
+		m, cmd := press(t, m, keyRunes("r"))
+		if m.epoch != epoch || !m.historyOpen || cmd != nil {
+			t.Fatalf("r changed something: epoch=%d open=%v cmd=%v", m.epoch, m.historyOpen, cmd != nil)
+		}
+		requireSpacing(t, m.View(), true, "after r")
+	})
+}
